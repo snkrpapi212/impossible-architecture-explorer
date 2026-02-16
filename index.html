@@ -89,6 +89,7 @@ renderer.setClearColor(0x05070a, 1);
 document.body.appendChild(renderer.domElement);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.03, 600);
+
 camera.position.set(0, 1.65, 2);
 
 // FPS rig (yaw + pitch)
@@ -276,6 +277,19 @@ function addColumns(group, w, h, d, count=6, color=0x404754) {
 
 addColumns(vast, 56, 9, 56, 16, 0x2f3744);
 addColumns(stair, 20, 14, 20, 10, 0x33463b);
+
+function scatterProps(group, w, d, count=20, color=0x5d6674) {
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0.05 });
+  for (let i=0;i<count;i++) {
+    const box = new THREE.Mesh(new THREE.BoxGeometry(0.6 + Math.random()*1.6, 0.35 + Math.random()*1.1, 0.6 + Math.random()*1.6), mat);
+    box.position.set((Math.random()-0.5)*(w*0.82), box.geometry.parameters.height/2, (Math.random()-0.5)*(d*0.82));
+    box.rotation.y = Math.random()*Math.PI;
+    box.castShadow = box.receiveShadow = true;
+    group.add(box);
+  }
+}
+scatterProps(vast, 56, 56, 34, 0x4a5668);
+scatterProps(stair, 20, 20, 12, 0x4f6458);
 
 // long repeating wall lights in loop halls
 for (const hall of [loopA, loopB]) {
