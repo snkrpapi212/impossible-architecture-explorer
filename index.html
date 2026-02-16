@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Impossible Architecture Explorer</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #030405; font-family: Inter, system-ui, sans-serif; }
+    #ui {
+      position: fixed; inset: 0; pointer-events: none; color: #d7dce1;
+      display: flex; justify-content: space-between; padding: 14px;
+      text-shadow: 0 0 8px rgba(0,0,0,.7);
+    }
+    #left, #right { display: flex; flex-direction: column; gap: 8px; }
+    .panel { background: rgba(10,14,18,.5); border: 1px solid rgba(170,190,220,.2); border-radius: 10px; padding: 8px 10px; backdrop-filter: blur(2px); }
+    #crosshair {
+      position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      width: 12px; height: 12px; pointer-events: none;
+    }
+    #crosshair::before, #crosshair::after {
+      content: ""; position: absolute; background: rgba(220,230,255,.8);
+    }
+    #crosshair::before { left: 5px; top: 0; width: 2px; height: 12px; }
+    #crosshair::after { left: 0; top: 5px; width: 12px; height: 2px; }
+    #mapCanvas {
+      width: 220px; height: 220px; border-radius: 10px;
+      border: 1px solid rgba(180,200,255,.3); background: rgba(4,8,12,.72);
+      image-rendering: pixelated;
+    }
+    #startOverlay {
+      position: fixed; inset: 0; display: grid; place-items: center; background: radial-gradient(circle at center, #0a0d11 0%, #030405 70%);
+      color: #dce4ef; z-index: 10;
+    }
+    #startCard { max-width: 680px; padding: 24px; border: 1px solid rgba(170,190,220,.25); border-radius: 14px; background: rgba(10,14,18,.65); }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    p { opacity: .9; line-height: 1.35; margin: 8px 0; }
+    button {
+      margin-top: 14px; pointer-events: auto; cursor: pointer; border: 0; color: #0a0f14;
+      background: linear-gradient(135deg, #9cc8ff, #7ff5df); font-weight: 700;
+      padding: 10px 16px; border-radius: 8px;
+    }
+  </style>
+</head>
+<body>
+<div id="startOverlay">
+  <div id="startCard">
+    <h1>Impossible Architecture Explorer</h1>
+    <p>WASD move • Mouse look • Shift sprint • Space jump • E interact</p>
+    <p>Collect 5 artifacts hidden across impossible zones. Doors are lies. Corridors are loops. Gravity is optional.</p>
+    <button id="startBtn">Enter the building</button>
+  </div>
+</div>
+<div id="crosshair"></div>
+<div id="ui">
+  <div id="left">
+    <div class="panel" id="status">Artifacts: 0 / 5</div>
+    <div class="panel" id="zone">Zone: Lobby Echo</div>
+    <div class="panel" id="hint">Hint: Walk through shimmering doorways.</div>
+  </div>
+  <div id="right">
+    <canvas id="mapCanvas" width="220" height="220"></canvas>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x05080b, 0.032);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.6));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.03, 600);
+camera.position.set(0, 1.65, 2);
+
+// FPS rig (yaw + pitch)
+const yaw = new THREE.Object3D();
+const pitch = new THREE.Object3D();
+pitch.add(camera);
+yaw.add(pitch);
+scene.add(yaw);
+
+let pointerLocked = false;
+const velocity = new THREE.Vector3();
+const move = { f:0, b:0, l:0, r:0, sprint:false, jump:false };
+let onGround = false;
+let gravity = new THREE.Vector3(0, -22, 0);
+let worldUp = new THREE.Vector3(0,1,0);
+let camRoll = 0;
+
+const keys = new Set();
+const startBtn = document.getElementById('startBtn');
+const overlay = document.getElementById('startOverlay');
+
+startBtn.addEventListener('click', () => {
+  renderer.domElement.requestPointerLock();
+});
+
+document.addEventListener('pointerlockchange', () => {
+  pointerLocked = document.pointerLockElement === renderer.domElement;
+  overlay.style.display = pointerLocked ? 'none' : 'grid';
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!pointerLocked) return;
+  yaw.rotation.y -= e.movementX * 0.0018;
+  pitch.rotation.x -= e.movementY * 0.0018;
+  pitch.rotation.x = Math.max(-Math.PI/2 + 0.02, Math.min(Math.PI/2 - 0.02, pitch.rotation.x));
+});
+
+document.addEventListener('keydown', (e) => {
+  keys.add(e.code);
+  if (e.code === 'Space') move.jump = true;
+});
+document.addEventListener('keyup', (e) => {
+  keys.delete(e.code);
+});
+
+// Lighting
+const hemi = new THREE.HemisphereLight(0x8faec8, 0x1b1713, 0.5);
+scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xc8ddff, 0.45);
+dir.position.set(12, 24, 8);
+dir.castShadow = true;
+dir.shadow.mapSize.set(2048, 2048);
+scene.add(dir);
+
+const ambience = new THREE.Group();
+scene.add(ambience);
+
+// Materials
+const mWall = new THREE.MeshStandardMaterial({ color: 0xc7c3bb, roughness: 0.92, metalness: 0.02 });
+const mFloor = new THREE.MeshStandardMaterial({ color: 0x8d8a80, roughness: 0.95, metalness: 0.0 });
+const mCeil = new THREE.MeshStandardMaterial({ color: 0xb8b3aa, roughness: 0.9 });
+const mTrim = new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.6 });
+
+function room({w,h,d,x,y,z, tint=0xffffff, name='zone'}) {
+  const g = new THREE.Group();
+  g.position.set(x,y,z);
+  g.userData.zoneName = name;
+
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(w, 0.2, d), mFloor.clone());
+  floor.material.color.multiply(new THREE.Color(tint));
+  floor.position.y = 0;
+  floor.receiveShadow = true;
+  g.add(floor);
+
+  const ceil = new THREE.Mesh(new THREE.BoxGeometry(w, 0.2, d), mCeil.clone());
+  ceil.material.color.multiply(new THREE.Color(tint));
+  ceil.position.y = h;
+  g.add(ceil);
+
+  const walls = [
+    [w, h, 0.2, 0, h/2, -d/2],
+    [w, h, 0.2, 0, h/2, d/2],
+    [0.2, h, d, -w/2, h/2, 0],
+    [0.2, h, d, w/2, h/2, 0],
+  ];
+  for (const [ww,hh,dd,xx,yy,zz] of walls) {
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(ww,hh,dd), mWall.clone());
+    wall.material.color.multiply(new THREE.Color(tint));
+    wall.position.set(xx,yy,zz);
+    wall.castShadow = wall.receiveShadow = true;
+    g.add(wall);
+  }
+
+  scene.add(g);
+  return g;
+}
+
+// Build impossible zones
+const zones = [];
+const lobby = room({w:16,h:4,d:16,x:0,y:0,z:0,tint:0xf1f3e8,name:'Lobby Echo'}); zones.push(lobby);
+const vast = room({w:56,h:9,d:56,x:90,y:0,z:0,tint:0xd9f0ff,name:'Cathedral Void'}); zones.push(vast);
+const loopA = room({w:8,h:3.8,d:42,x:-50,y:0,z:0,tint:0xffe4cc,name:'Loop Hall α'}); zones.push(loopA);
+const loopB = room({w:8,h:3.8,d:42,x:-50,y:0,z:70,tint:0xe4dcff,name:'Loop Hall β'}); zones.push(loopB);
+const stair = room({w:20,h:14,d:20,x:0,y:-20,z:70,tint:0xe8ffe8,name:'Escher Stairwell'}); zones.push(stair);
+
+// Carve fake doors by hiding wall chunks (simple visual)
+function addDoorFrame(group, pos, rotY=0, color=0x88b7ff) {
+  const frame = new THREE.Group();
+  frame.position.copy(pos);
+  frame.rotation.y = rotY;
+  const sideGeo = new THREE.BoxGeometry(0.18, 2.7, 0.2);
+  const topGeo = new THREE.BoxGeometry(1.6, 0.18, 0.2);
+  const mat = new THREE.MeshStandardMaterial({ color, emissive: 0x102030, roughness: 0.25, metalness: 0.3 });
+  const a = new THREE.Mesh(sideGeo, mat), b = new THREE.Mesh(sideGeo, mat), c = new THREE.Mesh(topGeo, mat);
+  a.position.set(-0.8,1.35,0); b.position.set(0.8,1.35,0); c.position.set(0,2.62,0);
+  frame.add(a,b,c);
+  group.add(frame);
+  return frame;
+}
+
+// Portals (render-to-texture)
+const portalRT1 = new THREE.WebGLRenderTarget(1024, 1024);
+const portalRT2 = new THREE.WebGLRenderTarget(1024, 1024);
+const portalMat1 = new THREE.MeshBasicMaterial({ map: portalRT1.texture });
+const portalMat2 = new THREE.MeshBasicMaterial({ map: portalRT2.texture });
+
+function makePortal(width=1.6,height=2.6, mat) {
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width,height), mat);
+  mesh.userData.size = { w: width, h: height };
+  return mesh;
+}
+
+const p1Frame = addDoorFrame(lobby, new THREE.Vector3(0,0,-7.9), 0, 0x7ad7ff);
+const p2Frame = addDoorFrame(vast, new THREE.Vector3(0,0,27.9), Math.PI, 0x7ad7ff);
+const p1 = makePortal(1.6,2.6, portalMat1); p1.position.set(0,1.3,0.01); p1Frame.add(p1);
+const p2 = makePortal(1.6,2.6, portalMat2); p2.position.set(0,1.3,0.01); p2Frame.add(p2);
+
+const portals = [
+  { from:p1, to:p2, cooldown:0, zone:'Lobby Echo -> Cathedral Void' },
+  { from:p2, to:p1, cooldown:0, zone:'Cathedral Void -> Lobby Echo' },
+];
+
+// Loop hallway transition volumes
+const loopTriggerA = new THREE.Box3(new THREE.Vector3(-53,0,18), new THREE.Vector3(-47,3.5,21));
+const loopTriggerB = new THREE.Box3(new THREE.Vector3(-53,0,88), new THREE.Vector3(-47,3.5,91));
+
+// Gravity zones
+const gravZones = [
+  { box: new THREE.Box3(new THREE.Vector3(-10,-1,62), new THREE.Vector3(10,12,78)), g:new THREE.Vector3(0,0,-22), roll:Math.PI*0.5, name:'Gravity: Sideways North' },
+  { box: new THREE.Box3(new THREE.Vector3(-10,-18,62), new THREE.Vector3(10,-8,78)), g:new THREE.Vector3(0,22,0), roll:Math.PI, name:'Gravity: Inverted' },
+];
+
+// Escher stairs (visual paradox)
+for (let i=0;i<24;i++) {
+  const step = new THREE.Mesh(new THREE.BoxGeometry(3.6,0.35,1.2), mTrim);
+  const t = i/24;
+  const angle = t*Math.PI*2;
+  const radius = 6.4;
+  step.position.set(Math.cos(angle)*radius, -18 + t*9.5, 70 + Math.sin(angle)*radius);
+  step.lookAt(0, step.position.y, 70);
+  step.castShadow = true;
+  scene.add(step);
+}
+
+// Puzzle artifacts
+const artifacts = [];
+const artifactPositions = [
+  new THREE.Vector3(3,1,3),
+  new THREE.Vector3(92,1,-6),
+  new THREE.Vector3(-50,1,35),
+  new THREE.Vector3(-50,1,78),
+  new THREE.Vector3(0,-14,70),
+];
+const artifactGeo = new THREE.IcosahedronGeometry(0.28, 0);
+for (let i=0;i<5;i++) {
+  const m = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(i*0.2,0.8,0.65), emissive: 0x111111, roughness: 0.2, metalness: 0.55 });
+  const a = new THREE.Mesh(artifactGeo, m);
+  a.position.copy(artifactPositions[i]);
+  a.castShadow = true;
+  a.userData.collected = false;
+  artifacts.push(a);
+  scene.add(a);
+}
+let collected = 0;
+
+// Horror: moving shadow watcher
+const watcher = new THREE.Mesh(new THREE.SphereGeometry(0.45, 14, 10), new THREE.MeshBasicMaterial({ color: 0x000000 }));
+watcher.visible = false;
+scene.add(watcher);
+let watcherTimer = 0;
+
+// Ambient audio (procedural drone)
+let audioCtx;
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const master = audioCtx.createGain(); master.gain.value = 0.03;
+  master.connect(audioCtx.destination);
+
+  const osc = audioCtx.createOscillator();
+  const lfo = audioCtx.createOscillator();
+  const lfoGain = audioCtx.createGain();
+  osc.type = 'sawtooth'; osc.frequency.value = 44;
+  lfo.type = 'sine'; lfo.frequency.value = 0.08; lfoGain.gain.value = 5;
+  lfo.connect(lfoGain); lfoGain.connect(osc.frequency);
+
+  const filter = audioCtx.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 140;
+  osc.connect(filter); filter.connect(master);
+  osc.start(); lfo.start();
+
+  setInterval(() => {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+    const o2 = audioCtx.createOscillator();
+    const g2 = audioCtx.createGain();
+    const f = audioCtx.createBiquadFilter();
+    o2.type = 'triangle';
+    o2.frequency.value = 180 + Math.random()*220;
+    g2.gain.setValueAtTime(0.0, now);
+    g2.gain.linearRampToValueAtTime(0.018, now + 0.3);
+    g2.gain.linearRampToValueAtTime(0.0, now + 2.0);
+    f.type='bandpass'; f.frequency.value = 240 + Math.random()*420;
+    o2.connect(f); f.connect(g2); g2.connect(master);
+    o2.start(now); o2.stop(now + 2.1);
+  }, 13000);
+}
+window.addEventListener('click', initAudio, { once: true });
+
+// Nonsense map
+const mapCanvas = document.getElementById('mapCanvas');
+const mctx = mapCanvas.getContext('2d');
+const pathLog = [];
+const zoneTransforms = {
+  'Lobby Echo': { sx:1, sz:1, r:0, ox:0, oz:0 },
+  'Cathedral Void': { sx:0.22, sz:0.22, r:Math.PI*0.85, ox:28, oz:-14 },
+  'Loop Hall α': { sx:1.4, sz:0.4, r:Math.PI*0.25, ox:-32, oz:20 },
+  'Loop Hall β': { sx:-1.4, sz:0.4, r:Math.PI*0.18, ox:-36, oz:-8 },
+  'Escher Stairwell': { sx:1.1, sz:-1.1, r:Math.PI*1.2, ox:8, oz:26 },
+};
+
+function inferZone(pos) {
+  for (const z of zones) {
+    const bb = new THREE.Box3().setFromObject(z);
+    if (bb.containsPoint(pos)) return z.userData.zoneName;
+  }
+  return 'Interstice';
+}
+
+function drawMap() {
+  mctx.fillStyle = 'rgba(5,10,16,0.3)';
+  mctx.fillRect(0,0,220,220);
+  mctx.strokeStyle = 'rgba(120,160,230,0.7)';
+  mctx.lineWidth = 1.3;
+  mctx.beginPath();
+  for (let i=0;i<pathLog.length;i++) {
+    const p = pathLog[i];
+    const tf = zoneTransforms[p.zone] || {sx:1,sz:1,r:0,ox:0,oz:0};
+    const x = p.x*tf.sx, z = p.z*tf.sz;
+    const rx = x*Math.cos(tf.r)-z*Math.sin(tf.r), rz = x*Math.sin(tf.r)+z*Math.cos(tf.r);
+    const px = 110 + rx*2 + tf.ox;
+    const py = 110 + rz*2 + tf.oz;
+    if (i===0) mctx.moveTo(px,py); else mctx.lineTo(px,py);
+  }
+  mctx.stroke();
+}
+
+// UI refs
+const statusEl = document.getElementById('status');
+const zoneEl = document.getElementById('zone');
+const hintEl = document.getElementById('hint');
+
+function updateUI(zoneName) {
+  statusEl.textContent = `Artifacts: ${collected} / 5`;
+  zoneEl.textContent = `Zone: ${zoneName}`;
+  if (collected < 5) hintEl.textContent = 'Hint: Some staircases return you to where you started. Keep searching.';
+  else hintEl.textContent = 'All artifacts found. The building notices you now.';
+}
+
+// Collision helpers
+const playerRadius = 0.28;
+const floorY = 1.65;
+
+function applySimpleBounds(pos) {
+  // Keep player inside rough scene extents; avoid falling forever
+  pos.x = THREE.MathUtils.clamp(pos.x, -120, 140);
+  pos.y = THREE.MathUtils.clamp(pos.y, -30, 60);
+  pos.z = THREE.MathUtils.clamp(pos.z, -120, 150);
+}
+
+function renderPortalTexture(srcPortal, dstPortal, target) {
+  const portalCam = camera.clone();
+
+  const srcMat = srcPortal.matrixWorld;
+  const dstMat = dstPortal.matrixWorld;
+  const srcInv = new THREE.Matrix4().copy(srcMat).invert();
+
+  const camMat = camera.matrixWorld;
+  const relative = new THREE.Matrix4().multiplyMatrices(srcInv, camMat);
+
+  const rot180 = new THREE.Matrix4().makeRotationY(Math.PI);
+  const newCamMat = new THREE.Matrix4().multiplyMatrices(dstMat, rot180).multiply(relative);
+
+  portalCam.matrixWorld.copy(newCamMat);
+  portalCam.matrixWorld.decompose(portalCam.position, portalCam.quaternion, portalCam.scale);
+  portalCam.updateMatrixWorld(true);
+  portalCam.projectionMatrix.copy(camera.projectionMatrix);
+
+  srcPortal.visible = false;
+  renderer.setRenderTarget(target);
+  renderer.render(scene, portalCam);
+  renderer.setRenderTarget(null);
+  srcPortal.visible = true;
+}
+
+function checkPortalCross(dt) {
+  for (const prt of portals) {
+    prt.cooldown = Math.max(0, prt.cooldown - dt);
+    if (prt.cooldown > 0) continue;
+
+    const from = prt.from;
+    const to = prt.to;
+    const portalPos = new THREE.Vector3().setFromMatrixPosition(from.matrixWorld);
+    const portalNormal = new THREE.Vector3(0,0,1).applyQuaternion(from.getWorldQuaternion(new THREE.Quaternion()));
+    const toPortalNormal = new THREE.Vector3(0,0,1).applyQuaternion(to.getWorldQuaternion(new THREE.Quaternion()));
+
+    const playerPos = yaw.position;
+    const d = portalNormal.dot(playerPos.clone().sub(portalPos));
+    const inFront = d > -0.18 && d < 0.22;
+
+    // local bounds check
+    const local = playerPos.clone();
+    from.worldToLocal(local);
+    const hw = from.userData.size.w * 0.55;
+    const hh = from.userData.size.h * 0.55;
+    const insideRect = Math.abs(local.x) < hw && Math.abs(local.y - 1.3) < hh;
+
+    if (inFront && insideRect) {
+      const offset = playerPos.clone().sub(portalPos);
+      const q = new THREE.Quaternion().setFromUnitVectors(portalNormal, toPortalNormal.clone().negate());
+      const mapped = offset.applyQuaternion(q);
+
+      yaw.position.copy(new THREE.Vector3().setFromMatrixPosition(to.matrixWorld).add(mapped).addScaledVector(toPortalNormal, 0.9));
+      yaw.rotation.y += Math.PI;
+      prt.cooldown = 0.35;
+      portals.forEach(p => p.cooldown = Math.max(p.cooldown, 0.2));
+    }
+  }
+}
+
+let prevYaw = 0;
+let turnAccumulator = 0;
+
+const clock = new THREE.Clock();
+function animate() {
+  const dt = Math.min(clock.getDelta(), 0.03);
+
+  // input state
+  move.f = keys.has('KeyW') ? 1 : 0;
+  move.b = keys.has('KeyS') ? 1 : 0;
+  move.l = keys.has('KeyA') ? 1 : 0;
+  move.r = keys.has('KeyD') ? 1 : 0;
+  move.sprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
+
+  // gravity zone switching
+  let inSpecialGrav = false;
+  for (const gz of gravZones) {
+    if (gz.box.containsPoint(yaw.position)) {
+      gravity.lerp(gz.g, 0.12);
+      camRoll = THREE.MathUtils.lerp(camRoll, gz.roll, 0.08);
+      zoneEl.textContent = gz.name;
+      inSpecialGrav = true;
+      break;
+    }
+  }
+  if (!inSpecialGrav) {
+    gravity.lerp(new THREE.Vector3(0,-22,0), 0.1);
+    camRoll = THREE.MathUtils.lerp(camRoll, 0, 0.08);
+  }
+  camera.rotation.z = camRoll;
+
+  // movement basis
+  const forward = new THREE.Vector3(0,0,-1).applyQuaternion(yaw.quaternion);
+  forward.y = 0; forward.normalize();
+  const right = new THREE.Vector3(1,0,0).applyQuaternion(yaw.quaternion);
+  right.y = 0; right.normalize();
+
+  const wish = new THREE.Vector3();
+  wish.addScaledVector(forward, move.f - move.b);
+  wish.addScaledVector(right, move.r - move.l);
+  if (wish.lengthSq() > 0) wish.normalize();
+
+  const speed = move.sprint ? 8.2 : 5.2;
+  velocity.x = THREE.MathUtils.damp(velocity.x, wish.x * speed, 10, dt);
+  velocity.z = THREE.MathUtils.damp(velocity.z, wish.z * speed, 10, dt);
+
+  // jump + gravity
+  if (move.jump && onGround) {
+    velocity.y = 7.8;
+    onGround = false;
+  }
+  move.jump = false;
+  velocity.addScaledVector(gravity, dt);
+
+  yaw.position.addScaledVector(velocity, dt);
+  applySimpleBounds(yaw.position);
+
+  if (yaw.position.y < floorY) {
+    yaw.position.y = floorY;
+    velocity.y = Math.max(0, velocity.y);
+    onGround = true;
+  }
+
+  // hall loop paradox
+  if (loopTriggerA.containsPoint(yaw.position)) {
+    yaw.position.z += 70;
+    yaw.rotation.y += 0.07;
+  } else if (loopTriggerB.containsPoint(yaw.position)) {
+    yaw.position.z -= 70;
+    yaw.rotation.y -= 0.07;
+  }
+
+  // Escher stairs wrap (up ends at start)
+  if (yaw.position.distanceTo(new THREE.Vector3(0,-8,70)) < 3.0 && yaw.position.y > -9) {
+    yaw.position.y -= 9.4;
+  }
+  if (yaw.position.distanceTo(new THREE.Vector3(0,-17,70)) < 3.0 && yaw.position.y < -15.2) {
+    yaw.position.y += 9.4;
+  }
+
+  checkPortalCross(dt);
+
+  // Collect artifacts
+  for (const a of artifacts) {
+    a.rotation.y += dt * 1.2;
+    a.position.y += Math.sin(clock.elapsedTime * 2 + a.position.x) * 0.002;
+    if (!a.userData.collected && yaw.position.distanceTo(a.position) < 1.1) {
+      a.userData.collected = true;
+      a.visible = false;
+      collected++;
+    }
+  }
+
+  // Turn-around world shift
+  const dyaw = Math.abs(THREE.MathUtils.euclideanModulo(yaw.rotation.y - prevYaw + Math.PI, Math.PI*2) - Math.PI);
+  turnAccumulator += dyaw;
+  prevYaw = yaw.rotation.y;
+  if (turnAccumulator > Math.PI * 1.3) {
+    turnAccumulator = 0;
+    // subtly mutate room tint
+    zones.forEach((z,i) => {
+      z.traverse(o => {
+        if (o.material && o.material.color) {
+          const hsl = {h:0,s:0,l:0};
+          o.material.color.getHSL(hsl);
+          hsl.h = (hsl.h + (0.03 + i*0.004)) % 1;
+          o.material.color.setHSL(hsl.h, hsl.s, Math.max(0.2, Math.min(0.82, hsl.l + (Math.random()-0.5)*0.03)));
+        }
+      });
+    });
+  }
+
+  // Watcher appears at edge of vision, disappears if looked at
+  watcherTimer -= dt;
+  if (watcherTimer <= 0) {
+    watcherTimer = 6 + Math.random()*8;
+    const dirVec = new THREE.Vector3(Math.random() > 0.5 ? 1 : -1, 0, -1).normalize();
+    dirVec.applyQuaternion(yaw.quaternion);
+    watcher.position.copy(yaw.position).add(dirVec.multiplyScalar(6.8));
+    watcher.position.y = yaw.position.y - 0.8;
+    watcher.visible = true;
+  }
+  if (watcher.visible) {
+    const toWatcher = watcher.position.clone().sub(camera.getWorldPosition(new THREE.Vector3())).normalize();
+    const camDir = camera.getWorldDirection(new THREE.Vector3());
+    if (camDir.dot(toWatcher) > 0.85) watcher.visible = false;
+  }
+
+  const currentZone = inferZone(yaw.position);
+  updateUI(currentZone);
+
+  // Map nonsense path
+  if (pathLog.length === 0 || new THREE.Vector2(pathLog[pathLog.length-1].x, pathLog[pathLog.length-1].z).distanceTo(new THREE.Vector2(yaw.position.x, yaw.position.z)) > 0.6) {
+    pathLog.push({ x: yaw.position.x, z: yaw.position.z, zone: currentZone });
+    if (pathLog.length > 900) pathLog.shift();
+  }
+  drawMap();
+
+  renderPortalTexture(p1, p2, portalRT1);
+  renderPortalTexture(p2, p1, portalRT2);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
