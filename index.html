@@ -39,6 +39,14 @@
       background: linear-gradient(135deg, #9cc8ff, #7ff5df); font-weight: 700;
       padding: 10px 16px; border-radius: 8px;
     }
+    #fx {
+      position: fixed; inset: 0; pointer-events: none; z-index: 2;
+      background:
+        radial-gradient(circle at center, transparent 55%, rgba(0,0,0,0.48) 100%),
+        repeating-linear-gradient(0deg, rgba(255,255,255,0.02) 0 1px, transparent 1px 3px);
+      mix-blend-mode: soft-light;
+      opacity: .34;
+    }
   </style>
 </head>
 <body>
@@ -51,6 +59,7 @@
   </div>
 </div>
 <div id="crosshair"></div>
+<div id="fx"></div>
 <div id="ui">
   <div id="left">
     <div class="panel" id="status">Artifacts: 0 / 5</div>
@@ -66,13 +75,17 @@
 import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x05080b, 0.032);
+scene.fog = new THREE.FogExp2(0x070a0f, 0.018);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.6));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.18;
+renderer.setClearColor(0x05070a, 1);
 document.body.appendChild(renderer.domElement);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.03, 600);
@@ -122,9 +135,9 @@ document.addEventListener('keyup', (e) => {
 });
 
 // Lighting
-const hemi = new THREE.HemisphereLight(0x8faec8, 0x1b1713, 0.5);
+const hemi = new THREE.HemisphereLight(0xb9d2ff, 0x1f1a16, 0.92);
 scene.add(hemi);
-const dir = new THREE.DirectionalLight(0xc8ddff, 0.45);
+const dir = new THREE.DirectionalLight(0xd7e8ff, 0.88);
 dir.position.set(12, 24, 8);
 dir.castShadow = true;
 dir.shadow.mapSize.set(2048, 2048);
@@ -132,12 +145,34 @@ scene.add(dir);
 
 const ambience = new THREE.Group();
 scene.add(ambience);
+const flickerLights = [];
+
+function makeNoiseTexture(a=28, b=42, size=128) {
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(size, size);
+  for (let i=0; i<img.data.length; i+=4) {
+    const n = a + Math.random()*b;
+    img.data[i] = n; img.data[i+1] = n*0.98; img.data[i+2] = n*0.92; img.data[i+3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(8,8);
+  tex.anisotropy = 4;
+  return tex;
+}
+
+const wallTex = makeNoiseTexture(150, 55, 192);
+wallTex.repeat.set(9, 3.5);
+const floorTex = makeNoiseTexture(105, 40, 192);
+floorTex.repeat.set(10, 10);
 
 // Materials
-const mWall = new THREE.MeshStandardMaterial({ color: 0xc7c3bb, roughness: 0.92, metalness: 0.02 });
-const mFloor = new THREE.MeshStandardMaterial({ color: 0x8d8a80, roughness: 0.95, metalness: 0.0 });
-const mCeil = new THREE.MeshStandardMaterial({ color: 0xb8b3aa, roughness: 0.9 });
-const mTrim = new THREE.MeshStandardMaterial({ color: 0x2a2f3a, roughness: 0.6 });
+const mWall = new THREE.MeshStandardMaterial({ color: 0xd3d0c8, roughness: 0.78, metalness: 0.02, map: wallTex });
+const mFloor = new THREE.MeshStandardMaterial({ color: 0x8a877f, roughness: 0.92, metalness: 0.0, map: floorTex });
+const mCeil = new THREE.MeshStandardMaterial({ color: 0xd5cec1, roughness: 0.72, metalness: 0.01, map: wallTex });
+const mTrim = new THREE.MeshStandardMaterial({ color: 0x2f3340, roughness: 0.35, metalness: 0.22 });
 
 function room({w,h,d,x,y,z, tint=0xffffff, name='zone'}) {
   const g = new THREE.Group();
@@ -149,6 +184,13 @@ function room({w,h,d,x,y,z, tint=0xffffff, name='zone'}) {
   floor.position.y = 0;
   floor.receiveShadow = true;
   g.add(floor);
+
+  // floor line pattern (liminal tiles)
+  const grid = new THREE.GridHelper(Math.max(w,d), Math.floor(Math.max(w,d)), 0x4e5666, 0x3b4350);
+  grid.position.y = 0.12;
+  grid.material.opacity = 0.26;
+  grid.material.transparent = true;
+  g.add(grid);
 
   const ceil = new THREE.Mesh(new THREE.BoxGeometry(w, 0.2, d), mCeil.clone());
   ceil.material.color.multiply(new THREE.Color(tint));
@@ -169,6 +211,32 @@ function room({w,h,d,x,y,z, tint=0xffffff, name='zone'}) {
     g.add(wall);
   }
 
+  // trim ring
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x272c36, roughness: 0.3, metalness: 0.2 });
+  const t1 = new THREE.Mesh(new THREE.BoxGeometry(w-0.6, 0.16, 0.14), trimMat);
+  const t2 = new THREE.Mesh(new THREE.BoxGeometry(w-0.6, 0.16, 0.14), trimMat);
+  const t3 = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.16, d-0.6), trimMat);
+  const t4 = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.16, d-0.6), trimMat);
+  t1.position.set(0, h-0.45, -d/2+0.08); t2.position.set(0, h-0.45, d/2-0.08);
+  t3.position.set(-w/2+0.08, h-0.45, 0); t4.position.set(w/2-0.08, h-0.45, 0);
+  g.add(t1,t2,t3,t4);
+
+  // fluorescent bars
+  const count = Math.max(2, Math.floor((w*d) / 140));
+  for (let i=0;i<count;i++) {
+    const lx = (i/(count-1 || 1)-0.5)*(w*0.7);
+    const bar = new THREE.Mesh(
+      new THREE.BoxGeometry(Math.min(4.5, w*0.28), 0.08, 0.25),
+      new THREE.MeshStandardMaterial({ color: 0xe8f3ff, emissive: 0xaed4ff, emissiveIntensity: 0.45 })
+    );
+    bar.position.set(lx, h-0.22, 0);
+    g.add(bar);
+    const pl = new THREE.PointLight(0xb6d8ff, 0.85, Math.max(w,d)*0.9, 2);
+    pl.position.set(lx, h-0.45, 0);
+    g.add(pl);
+    flickerLights.push(pl);
+  }
+
   scene.add(g);
   return g;
 }
@@ -181,6 +249,51 @@ const loopA = room({w:8,h:3.8,d:42,x:-50,y:0,z:0,tint:0xffe4cc,name:'Loop Hall Î
 const loopB = room({w:8,h:3.8,d:42,x:-50,y:0,z:70,tint:0xe4dcff,name:'Loop Hall Î²'}); zones.push(loopB);
 const stair = room({w:20,h:14,d:20,x:0,y:-20,z:70,tint:0xe8ffe8,name:'Escher Stairwell'}); zones.push(stair);
 
+const zoneMood = [
+  [lobby, 0xffefc2, 0.8],
+  [vast, 0xa9ceff, 1.2],
+  [loopA, 0xffc8a2, 0.75],
+  [loopB, 0xc6b8ff, 0.75],
+  [stair, 0xb8ffd9, 0.8],
+];
+for (const [z, color, intensity] of zoneMood) {
+  const l = new THREE.PointLight(color, intensity, 75, 2);
+  l.position.set(0, 2.2, 0);
+  z.add(l);
+}
+
+function addColumns(group, w, h, d, count=6, color=0x404754) {
+  const geo = new THREE.CylinderGeometry(0.22, 0.28, h-0.25, 8);
+  const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.2 });
+  for (let i=0;i<count;i++) {
+    const t = i / count * Math.PI * 2;
+    const c = new THREE.Mesh(geo, mat);
+    c.position.set(Math.cos(t)*(w*0.35), (h-0.25)/2, Math.sin(t)*(d*0.35));
+    c.castShadow = true;
+    group.add(c);
+  }
+}
+
+addColumns(vast, 56, 9, 56, 16, 0x2f3744);
+addColumns(stair, 20, 14, 20, 10, 0x33463b);
+
+// long repeating wall lights in loop halls
+for (const hall of [loopA, loopB]) {
+  for (let i=0;i<8;i++) {
+    const z = -18 + i*5;
+    const lamp = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, 0.45, 1.2),
+      new THREE.MeshStandardMaterial({ color: 0xdce8ff, emissive: 0x7fb7ff, emissiveIntensity: 0.5 })
+    );
+    lamp.position.set(3.8, 2.3, z);
+    hall.add(lamp);
+    const l = new THREE.PointLight(0x8eb8ff, 0.45, 8, 2);
+    l.position.set(3.3, 2.2, z);
+    hall.add(l);
+    flickerLights.push(l);
+  }
+}
+
 // Carve fake doors by hiding wall chunks (simple visual)
 function addDoorFrame(group, pos, rotY=0, color=0x88b7ff) {
   const frame = new THREE.Group();
@@ -188,7 +301,7 @@ function addDoorFrame(group, pos, rotY=0, color=0x88b7ff) {
   frame.rotation.y = rotY;
   const sideGeo = new THREE.BoxGeometry(0.18, 2.7, 0.2);
   const topGeo = new THREE.BoxGeometry(1.6, 0.18, 0.2);
-  const mat = new THREE.MeshStandardMaterial({ color, emissive: 0x102030, roughness: 0.25, metalness: 0.3 });
+  const mat = new THREE.MeshStandardMaterial({ color, emissive: 0x1a3055, emissiveIntensity: 0.9, roughness: 0.2, metalness: 0.45 });
   const a = new THREE.Mesh(sideGeo, mat), b = new THREE.Mesh(sideGeo, mat), c = new THREE.Mesh(topGeo, mat);
   a.position.set(-0.8,1.35,0); b.position.set(0.8,1.35,0); c.position.set(0,2.62,0);
   frame.add(a,b,c);
@@ -199,8 +312,8 @@ function addDoorFrame(group, pos, rotY=0, color=0x88b7ff) {
 // Portals (render-to-texture)
 const portalRT1 = new THREE.WebGLRenderTarget(1024, 1024);
 const portalRT2 = new THREE.WebGLRenderTarget(1024, 1024);
-const portalMat1 = new THREE.MeshBasicMaterial({ map: portalRT1.texture });
-const portalMat2 = new THREE.MeshBasicMaterial({ map: portalRT2.texture });
+const portalMat1 = new THREE.MeshBasicMaterial({ map: portalRT1.texture, toneMapped: false });
+const portalMat2 = new THREE.MeshBasicMaterial({ map: portalRT2.texture, toneMapped: false });
 
 function makePortal(width=1.6,height=2.6, mat) {
   const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width,height), mat);
@@ -431,6 +544,13 @@ let turnAccumulator = 0;
 const clock = new THREE.Clock();
 function animate() {
   const dt = Math.min(clock.getDelta(), 0.03);
+  const t = clock.elapsedTime;
+
+  // atmosphere motion
+  scene.fog.density = 0.014 + Math.sin(t*0.07)*0.002;
+  flickerLights.forEach((l, i) => {
+    l.intensity = 0.55 + Math.sin(t*2.2 + i*1.13)*0.1 + (Math.random() < 0.004 ? -0.2 : 0);
+  });
 
   // input state
   move.f = keys.has('KeyW') ? 1 : 0;
